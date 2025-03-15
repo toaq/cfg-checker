@@ -47,6 +47,130 @@ void print_derivation(
   print_sentential_form(symbols, s);
 }
 
+
+
+
+
+// ---------------------------------------------------------------------------
+// Parse tree node used by the recursive descent parser.
+struct ParseTree {
+  size_t symbol;  // The symbol (as an index into the symbols vector)
+  std::vector<std::shared_ptr<ParseTree>> children;
+};
+
+// A helper struct that holds a parse tree along with the next position in the
+// input tokens after parsing.
+struct ParseResult {
+  std::shared_ptr<ParseTree> tree;
+  size_t nextPos;
+};
+
+// A temporary structure to accumulate children for a production alternative.
+struct PartialResult {
+  std::vector<std::shared_ptr<ParseTree>> children;
+  size_t pos;
+};
+
+// ---------------------------------------------------------------------------
+// Recursive descent function.
+// Given the grammar (rules), the input (vector of symbol IDs), a current
+// position, and a symbol to parse, this function returns all possible parse
+// results (trees with the updated position) for that symbol.
+// If the symbol is terminal (i.e. has no productions), it matches the input
+// directly. Otherwise, it recursively processes each alternative.
+// ---------------------------------------------------------------------------
+std::vector<ParseResult> parse_symbol(
+    const std::vector<std::vector<std::vector<size_t>>>& rules,
+    const std::vector<size_t>& input,
+    size_t pos,
+    size_t symbol) {
+  std::vector<ParseResult> results;
+
+  // Terminal symbol: no production rules.
+  if (rules[symbol].empty()) {
+    if (pos < input.size() && input[pos] == symbol) {
+      ParseResult pr;
+      pr.tree = std::make_shared<ParseTree>();
+      pr.tree->symbol = symbol;
+      pr.nextPos = pos + 1;
+      results.push_back(pr);
+    }
+    return results;
+  }
+
+  // Nonterminal: try each alternative production.
+  for (const auto& alternative : rules[symbol]) {
+    // Start with an initial partial result (no children yet) at the current pos.
+    std::vector<PartialResult> partials = { { {}, pos } };
+
+    // Process each symbol in the alternative sequentially.
+    for (size_t subSymbol : alternative) {
+      std::vector<PartialResult> newPartials;
+      for (const auto& part : partials) {
+        auto childResults = parse_symbol(rules, input, part.pos, subSymbol);
+        for (const auto& child : childResults) {
+          PartialResult pr;
+          pr.children = part.children;
+          pr.children.push_back(child.tree);
+          pr.pos = child.nextPos;
+          newPartials.push_back(pr);
+        }
+      }
+      partials = newPartials;
+      if (partials.empty())
+        break; // This alternative failed.
+    }
+
+    // For each successful partial result, build a parse tree for the current nonterminal.
+    for (const auto& part : partials) {
+      ParseResult pr;
+      pr.tree = std::make_shared<ParseTree>();
+      pr.tree->symbol = symbol;
+      pr.tree->children = part.children;
+      pr.nextPos = part.pos;
+      results.push_back(pr);
+    }
+  }
+  return results;
+}
+
+// ---------------------------------------------------------------------------
+// The main parse() function.
+// It calls the recursive descent parser on the start symbol (usually 0) and
+// then filters the results to those that exactly consumed the entire input.
+// ---------------------------------------------------------------------------
+std::vector<std::shared_ptr<ParseTree>> parse(
+    const std::vector<std::vector<std::vector<size_t>>>& rules,
+    const std::vector<size_t>& input,
+    size_t start_symbol) {
+  std::vector<std::shared_ptr<ParseTree>> trees;
+  auto results = parse_symbol(rules, input, 0, start_symbol);
+  for (const auto& res : results) {
+    if (res.nextPos == input.size()) {
+      trees.push_back(res.tree);
+    }
+  }
+  return trees;
+}
+
+// ---------------------------------------------------------------------------
+// Utility: Print a parse tree (with indentation) given the vector of symbol names.
+// ---------------------------------------------------------------------------
+void print_parse_tree(const std::vector<std::string>& symbols,
+                      const std::shared_ptr<ParseTree>& tree,
+                      int indent = 0) {
+  for (int i = 0; i < indent; ++i)
+    std::cout << " ";
+  std::cout << symbols[tree->symbol] << "\n";
+  for (const auto& child : tree->children) {
+    print_parse_tree(symbols, child, indent + 2);
+  }
+}
+
+
+
+
+
 // Determine whether there exists a sentence that can be derived
 // from a given nonterminal symbol.
 bool nonterminal_parsable(
@@ -270,9 +394,9 @@ size_t register_symbol(
 
 // Program entry point
 int main(int argc, char *argv[]) {
-  // Make sure we got a filename.
-  if (argc != 2) {
-    std::cout << "Usage: cfg-checker file.cfg\n";
+  if (argc != 2 && argc != 3) {
+    std::cout << "To search for ambiguities:\n\tcfg-checker file.cfg\n\n";
+    std::cout << "To parse a string:\n\tcfg-checker file.cfg \"string to parse\"\n\n";
     return 1;
   }
 
@@ -341,9 +465,16 @@ int main(int argc, char *argv[]) {
 
     // Read the nonterminal on the left of the equals sign.
     auto nonterminal = tokens[0];
+
+    // Skip comments.
+    if (nonterminal == "#") {
+      continue;
+    }
+
     if (!rules[register_symbol(symbols, rules, nonterminal)].empty()) {
-      std::cout << "Multiple rules for nonterminal '" << nonterminal << "'.\n";
-      return 1;
+      // Commented out, as it's nice to be able to split alternatives onto many lines:
+      // std::cout << "Multiple rules for nonterminal '" << nonterminal << "'.\n";
+      // return 1;
     }
 
     // Make sure the second token is an equals sign.
@@ -464,6 +595,53 @@ int main(int argc, char *argv[]) {
     }
   );
 
+  if (argc == 3) {
+    auto line = std::string(argv[2]);
+    std::vector<std::string> tokens = { "" };
+    for (size_t i = 0; i < line.size(); ++i) {
+      if (
+        line[i] == ' ' ||
+        line[i] == '\t' ||
+        line[i] == '\r' ||
+        line[i] == '\n'
+      ) {
+        if (tokens.back() != "") {
+          tokens.push_back("");
+        }
+      } else {
+        tokens.back() += line[i];
+      }
+    }
+    std::vector<size_t> input = { };
+    for (size_t i = 0; i < tokens.size(); ++i) {
+      for (size_t j = 0; j < symbols.size(); ++j) {
+        if (tokens[i] == symbols[j]) {
+          input.push_back(j);
+          goto next_token;
+        }
+      }
+      std::cout << "Unknown symbol " << tokens[i] << ".\n";
+      return 1;
+      next_token:
+      ;
+    }
+    auto trees = parse(rules, input, 0); // Assuming 0 is the start symbol.
+
+    if (trees.size() > 0) {
+      std::cout << "Found " << trees.size() << " parse tree(s):\n\n";
+      for (size_t i = 0; i < trees.size(); ++i) {
+        std::cout << "Parse tree " << i + 1 << ":\n";
+        print_parse_tree(symbols, trees[i], 2);
+        std::cout << "\n";
+      }
+      } else {
+      std::cout << "Parse failed." << std::endl;
+    }
+
+    return 0;
+
+  }
+
   // Start the search with the start symbol.
   std::queue<std::shared_ptr<sentential_form>> sentential_forms;
   auto s = std::make_shared<sentential_form>();
@@ -485,7 +663,7 @@ int main(int argc, char *argv[]) {
     // Occasionally print some dots to entertain the user.
     if (s->depth + 1 > search_depth) {
       search_depth = s->depth + 1;
-      std::cout << "." << std::flush;
+      std::cout << "Depth " << search_depth << "\n" << std::flush;
     }
 
     // Iterate over the sentential form.
